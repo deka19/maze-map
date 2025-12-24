@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Realistic 3D Maze Simulation</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: 'Courier New', Courier, monospace; }
+        #instructions {
+            position: absolute; top: 50%; left: 50%; width: 100%; text-align: center;
+            transform: translate(-50%, -50%); color: white; background: rgba(0,0,0,0.8);
+            padding: 20px; cursor: pointer; z-index: 10;
+        }
+        #minimap-container {
+            position: absolute; top: 20px; right: 20px;
+            width: 200px; height: 200px; background: rgba(0, 0, 0, 0.5);
+            border: 2px solid #555; border-radius: 8px; z-index: 5;
+        }
+        #minimap { width: 100%; height: 100%; }
+        #crosshair {
+            position: absolute; top: 50%; left: 50%; width: 10px; height: 10px;
+            background: rgba(255, 255, 255, 0.5); border-radius: 50%;
+            transform: translate(-50%, -50%); pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="instructions">
+        <h1>THE STONE MAZE</h1>
+        <p>Click to Start</p>
+        <p>W,A,S,D to Move | Mouse to Look</p>
+        <p>Find the Green Exit</p>
+    </div>
+    
+    <div id="crosshair"></div>
+    
+    <div id="minimap-container">
+        <canvas id="minimap"></canvas>
+    </div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { PointerLockControls } from 'https://unpkg.com/three@0.160.0/examples/jsm/controls/PointerLockControls.js';
+
+        // --- CONFIGURATION ---
+        const WALL_HEIGHT = 3;
+        const MOVEMENT_SPEED = 10.0;
+        const MAP_SCALE = 2; // Size of map blocks
+        
+        // 1 = Wall, 0 = Path, 2 = Start, 3 = Exit
+        // A complex representation similar to your image
+        const mazeMap = [
+            [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+            [2,0,0,0,1,0,0,0,0,0,1,0,1,0,0,0,0,0,0,1],
+            [1,1,1,0,1,0,1,1,1,0,1,0,1,0,1,1,1,1,0,1],
+            [1,0,0,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0,0,1],
+            [1,0,1,1,1,1,1,0,1,1,1,1,1,0,1,0,1,1,1,1],
+            [1,0,1,0,0,0,0,0,0,0,0,0,1,0,1,0,0,0,0,1],
+            [1,0,1,0,1,1,1,1,1,1,1,0,1,0,1,1,1,1,0,1],
+            [1,0,0,0,1,0,0,0,0,0,1,0,0,0,0,0,0,1,0,1],
+            [1,1,1,0,1,1,1,0,1,0,1,1,1,1,1,1,0,1,0,1],
+            [1,0,0,0,0,0,1,0,1,0,0,0,0,0,0,1,0,1,0,1],
+            [1,0,1,1,1,0,1,0,1,1,1,1,1,1,0,1,0,1,0,1],
+            [1,0,1,0,0,0,1,0,0,0,0,0,0,0,0,1,0,0,0,1],
+            [1,0,1,0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,0,1],
+            [1,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,3,1], // Exit at bottom right
+            [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+        ];
+
+        let camera, scene, renderer, controls;
+        let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false;
+        let prevTime = performance.now();
+        const velocity = new THREE.Vector3();
+        const direction = new THREE.Vector3();
+        const wallColliders = []; // Store wall boxes for collision
+        const mapSize = { rows: mazeMap.length, cols: mazeMap[0].length };
+
+        // --- PROCEDURAL TEXTURE GENERATOR (REALISM) ---
+        function createTexture(type) {
+            const canvas = document.createElement('canvas');
+            canvas.width = 512; canvas.height = 512;
+            const ctx = canvas.getContext('2d');
+            
+            // Base Color
+            ctx.fillStyle = type === 'wall' ? '#6e6e6e' : '#3d3d3d';
+            ctx.fillRect(0, 0, 512, 512);
+
+            // Add Noise
+            for (let i = 0; i < 50000; i++) {
+                ctx.fillStyle = Math.random() > 0.5 ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)';
+                ctx.fillRect(Math.random() * 512, Math.random() * 512, 2, 2);
+            }
+
+            // Add cracks/details
+            if (type === 'wall') {
+                ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+                ctx.lineWidth = 2;
+                for(let i=0; i<20; i++){
+                    ctx.beginPath();
+                    ctx.moveTo(Math.random()*512, Math.random()*512);
+                    ctx.lineTo(Math.random()*512, Math.random()*512);
+                    ctx.stroke();
+                }
+            }
+
+            const texture = new THREE.CanvasTexture(canvas);
+            texture.wrapS = THREE.RepeatWrapping;
+            texture.wrapT = THREE.RepeatWrapping;
+            return texture;
+        }
+
+        init();
+        animate();
+
+        function init() {
+            // 1. Scene Setup
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x111111); // Dark sky
+            scene.fog = new THREE.Fog(0x111111, 0, 20); // Fog for mystery
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+
+            // 2. Lighting
+            const light = new THREE.HemisphereLight(0xeeeeff, 0x777788, 0.5);
+            scene.add(light);
+            // Flashlight attached to camera
+            const pointLight = new THREE.PointLight(0xffaa00, 1, 15);
+            camera.add(pointLight);
+            scene.add(camera);
+
+            // 3. Materials
+            const wallTexture = createTexture('wall');
+            const floorTexture = createTexture('floor');
+            floorTexture.repeat.set(10, 10);
+            
+            const wallMat = new THREE.MeshStandardMaterial({ map: wallTexture, roughness: 0.9 });
+            const floorMat = new THREE.MeshStandardMaterial({ map: floorTexture, roughness: 1.0 });
+            const exitMat = new THREE.MeshBasicMaterial({ color: 0x00ff00 }); // Green exit
+
+            // 4. Build Maze
+            const boxGeo = new THREE.BoxGeometry(MAP_SCALE, WALL_HEIGHT, MAP_SCALE);
+
+            for (let z = 0; z < mapSize.rows; z++) {
+                for (let x = 0; x < mapSize.cols; x++) {
+                    let cell = mazeMap[z][x];
+                    let posX = x * MAP_SCALE;
+                    let posZ = z * MAP_SCALE;
+
+                    if (cell === 1) {
+                        // Wall
+                        const wall = new THREE.Mesh(boxGeo, wallMat);
+                        wall.position.set(posX, WALL_HEIGHT / 2, posZ);
+                        scene.add(wall);
+                        // Add to collision list (bounding box)
+                        wallColliders.push(new THREE.Box3().setFromObject(wall));
+                    } else if (cell === 2) {
+                        // Start Position
+                        camera.position.set(posX, 1.6, posZ);
+                    } else if (cell === 3) {
+                        // Exit
+                        const exit = new THREE.Mesh(new THREE.BoxGeometry(MAP_SCALE, 0.1, MAP_SCALE), exitMat);
+                        exit.position.set(posX, 0.05, posZ);
+                        scene.add(exit);
+                    }
+                }
+            }
+
+            // Floor
+            const floorGeo = new THREE.PlaneGeometry(100, 100);
+            const floor = new THREE.Mesh(floorGeo, floorMat);
+            floor.rotation.x = -Math.PI / 2;
+            scene.add(floor);
+
+            // 5. Controls
+            controls = new PointerLockControls(camera, document.body);
+
+            const instructions = document.getElementById('instructions');
+            instructions.addEventListener('click', function () {
+                controls.lock();
+            });
+
+            controls.addEventListener('lock', function () {
+                instructions.style.display = 'none';
+            });
+            controls.addEventListener('unlock', function () {
+                instructions.style.display = 'block';
+            });
+
+            scene.add(controls.getObject());
+
+            // Keyboard Listeners
+            const onKeyDown = function (event) {
+                switch (event.code) {
+                    case 'ArrowUp': case 'KeyW': moveForward = true; break;
+                    case 'ArrowLeft': case 'KeyA': moveLeft = true; break;
+                    case 'ArrowDown': case 'KeyS': moveBackward = true; break;
+                    case 'ArrowRight': case 'KeyD': moveRight = true; break;
+                }
+            };
+            const onKeyUp = function (event) {
+                switch (event.code) {
+                    case 'ArrowUp': case 'KeyW': moveForward = false; break;
+                    case 'ArrowLeft': case 'KeyA': moveLeft = false; break;
+                    case 'ArrowDown': case 'KeyS': moveBackward = false; break;
+                    case 'ArrowRight': case 'KeyD': moveRight = false; break;
+                }
+            };
+            document.addEventListener('keydown', onKeyDown);
+            document.addEventListener('keyup', onKeyUp);
+
+            // Renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+            
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function checkCollision(position) {
+            const playerBox = new THREE.Box3();
+            const size = 0.5; // Player width
+            playerBox.min.set(position.x - size, 0, position.z - size);
+            playerBox.max.set(position.x + size, 2, position.z + size);
+
+            for (const wallBox of wallColliders) {
+                if (playerBox.intersectsBox(wallBox)) return true;
+            }
+            return false;
+        }
+        
+        function updateMinimap() {
+            const c = document.getElementById('minimap');
+            const ctx = c.getContext('2d');
+            c.width = 200; c.height = 200; // Reset
+            
+            const cellW = c.width / mapSize.cols;
+            const cellH = c.height / mapSize.rows;
+
+            // Draw Map
+            for(let z=0; z<mapSize.rows; z++){
+                for(let x=0; x<mapSize.cols; x++){
+                    if(mazeMap[z][x] === 1) ctx.fillStyle = '#555'; // Wall
+                    else if(mazeMap[z][x] === 3) ctx.fillStyle = '#0f0'; // Exit
+                    else ctx.fillStyle = '#222'; // Floor
+                    ctx.fillRect(x*cellW, z*cellH, cellW, cellH);
+                }
+            }
+
+            // Draw Player
+            const px = camera.position.x / MAP_SCALE;
+            const pz = camera.position.z / MAP_SCALE;
+            
+            ctx.fillStyle = 'red';
+            ctx.beginPath();
+            ctx.arc(px * cellW, pz * cellH, 4, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const time = performance.now();
+            
+            if (controls.isLocked === true) {
+                const delta = (time - prevTime) / 1000;
+
+                velocity.x -= velocity.x * 10.0 * delta;
+                velocity.z -= velocity.z * 10.0 * delta;
+
+                direction.z = Number(moveForward) - Number(moveBackward);
+                direction.x = Number(moveRight) - Number(moveLeft);
+                direction.normalize();
+
+                if (moveForward || moveBackward) velocity.z -= direction.z * MOVEMENT_SPEED * delta;
+                if (moveLeft || moveRight) velocity.x -= direction.x * MOVEMENT_SPEED * delta;
+
+                // Predictive Collision Detection
+                const oldPos = camera.position.clone();
+                
+                controls.moveRight(-velocity.x * delta);
+                controls.moveForward(-velocity.z * delta);
+
+                if (checkCollision(camera.position)) {
+                    camera.position.copy(oldPos);
+                    velocity.x = 0;
+                    velocity.z = 0;
+                }
+                
+                // Win Check
+                const pX = Math.round(camera.position.x / MAP_SCALE);
+                const pZ = Math.round(camera.position.z / MAP_SCALE);
+                if(mazeMap[pZ] && mazeMap[pZ][pX] === 3) {
+                   document.getElementById('instructions').innerHTML = "<h1 style='color:#0f0'>YOU ESCAPED!</h1><p>Refresh to play again</p>";
+                   document.getElementById('instructions').style.display = 'block';
+                   controls.unlock();
+                }
+            }
+
+            prevTime = time;
+            
+            updateMinimap();
+            renderer.render(scene, camera);
+        }
+    </script>
+</body>
+</html>
