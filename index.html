@@ -2,17 +2,15 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Maze Speedrunner</title>
+    <title>Maze Speedrunner: Audio Edition</title>
     <style>
         body { margin: 0; overflow: hidden; font-family: 'Courier New', Courier, monospace; background: #000; }
         
-        /* UI OVERLAY */
         #ui-layer {
             position: absolute; top: 0; left: 0; width: 100%; height: 100%;
             pointer-events: none; z-index: 10;
         }
 
-        /* INSTRUCTIONS & WIN SCREEN */
         #message-box {
             position: absolute; top: 50%; left: 50%; 
             transform: translate(-50%, -50%);
@@ -24,17 +22,14 @@
         p { font-size: 1.2rem; color: #ccc; }
         .accent { color: #0f0; font-weight: bold; }
 
-        /* MINIMAP - FADED DEFAULT */
         #minimap-container {
             position: absolute; top: 20px; right: 20px;
             width: 200px; height: 200px; background: rgba(0, 0, 0, 0.8);
             border: 2px solid #555; border-radius: 8px; z-index: 5;
-            opacity: 0.2; /* Faded by default */
-            transition: opacity 0.2s ease-in-out; /* Smooth transition */
+            opacity: 0.2; transition: opacity 0.2s ease-in-out;
         }
         #minimap { width: 100%; height: 100%; }
 
-        /* CROSSHAIR */
         #crosshair {
             position: absolute; top: 50%; left: 50%; width: 8px; height: 8px;
             background: rgba(255, 255, 255, 0.8); border-radius: 50%;
@@ -59,9 +54,9 @@
         <div id="message-box">
             <h1>The Stone Maze</h1>
             <p>Click to Start</p>
-            <p><strong>WASD</strong> to Move (Fast)</p>
-            <p><strong>SHIFT</strong> (Hold) to Reveal Map</p>
-            <p class="accent">Find the Green Zone</p>
+            <p><strong>WASD</strong> to Move</p>
+            <p><strong>SHIFT</strong> (Hold) for Map</p>
+            <p class="accent">Sound Enabled</p>
         </div>
     </div>
 
@@ -77,12 +72,57 @@
         import * as THREE from 'three';
         import { PointerLockControls } from 'https://unpkg.com/three@0.160.0/examples/jsm/controls/PointerLockControls.js';
 
-        // --- CONFIGURATION ---
+        // --- AUDIO SYSTEM (Web Audio API) ---
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        
+        function playFootstep() {
+            if(audioCtx.state === 'suspended') audioCtx.resume();
+            
+            const osc = audioCtx.createOscillator();
+            const gainNode = audioCtx.createGain();
+            const filter = audioCtx.createBiquadFilter();
+
+            // Create a low "thud" sound
+            osc.type = 'square';
+            osc.frequency.setValueAtTime(50, audioCtx.currentTime);
+            osc.frequency.exponentialRampToValueAtTime(10, audioCtx.currentTime + 0.1);
+
+            filter.type = 'lowpass';
+            filter.frequency.value = 200;
+
+            gainNode.gain.setValueAtTime(0.2, audioCtx.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1);
+
+            osc.connect(filter);
+            filter.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+
+            osc.start();
+            osc.stop(audioCtx.currentTime + 0.15);
+        }
+
+        function playWinSound() {
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(440, audioCtx.currentTime);
+            osc.frequency.exponentialRampToValueAtTime(880, audioCtx.currentTime + 0.5);
+            
+            gain.gain.setValueAtTime(0.5, audioCtx.currentTime);
+            gain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 2);
+            
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start();
+            osc.stop(audioCtx.currentTime + 2);
+        }
+
+        // --- CONFIG ---
         const WALL_HEIGHT = 4;
-        const MOVEMENT_SPEED = 40.0; // Much faster
+        const MOVEMENT_SPEED = 40.0;
         const MAP_SCALE = 3; 
         
-        // 1=Wall, 0=Path, 2=Start, 3=Exit
         const mazeMap = [
             [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
             [2,0,0,0,1,0,0,0,0,0,1,0,1,0,0,0,0,0,0,1],
@@ -101,17 +141,16 @@
             [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
         ];
 
-        // Global Variables
         let camera, scene, renderer, controls;
         let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false;
         let prevTime = performance.now();
+        let lastStepTime = 0; // For audio timing
         const velocity = new THREE.Vector3();
         const direction = new THREE.Vector3();
         const wallColliders = [];
         const mapSize = { rows: mazeMap.length, cols: mazeMap[0].length };
-        const wallsMeshArray = []; // Store walls to animate color later
+        const wallsMeshArray = [];
 
-        // Game State
         let gameActive = false;
         let startTime = 0;
         let isWon = false;
@@ -126,48 +165,38 @@
             ctx.fillStyle = type === 'wall' ? '#555' : '#222';
             ctx.fillRect(0, 0, 512, 512);
 
-            // Heavy Noise
             for (let i = 0; i < 80000; i++) {
                 ctx.fillStyle = Math.random() > 0.5 ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.2)';
                 ctx.fillRect(Math.random() * 512, Math.random() * 512, 2, 2);
             }
             
-            // Stone blocks pattern
             if(type === 'wall'){
                 ctx.strokeStyle = '#333';
                 ctx.lineWidth = 4;
                 ctx.beginPath();
-                // Horizontal lines
                 for(let y=0; y<512; y+=64) { ctx.moveTo(0,y); ctx.lineTo(512,y); }
-                // Vertical lines (staggered)
                 for(let y=0; y<512; y+=64) {
                     let offset = (y/64)%2 === 0 ? 0 : 32;
                     for(let x=offset; x<512; x+=128) { ctx.moveTo(x,y); ctx.lineTo(x, y+64); }
                 }
                 ctx.stroke();
             }
-
-            const texture = new THREE.CanvasTexture(canvas);
-            texture.magFilter = THREE.NearestFilter; // Retro sharp look
-            return texture;
+            return new THREE.CanvasTexture(canvas);
         }
 
         init();
         animate();
 
         function init() {
-            // Scene
             scene = new THREE.Scene();
             scene.background = new THREE.Color(0x050505);
             scene.fog = new THREE.FogExp2(0x050505, 0.035);
 
             camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
 
-            // Lights
             const ambient = new THREE.AmbientLight(0x404040);
             scene.add(ambient);
             
-            // Player Torch
             const torch = new THREE.SpotLight(0xffffff, 2, 40, Math.PI/4, 0.5, 1);
             torch.position.set(0,0,0);
             torch.target.position.set(0,0,-1);
@@ -175,8 +204,8 @@
             camera.add(torch.target);
             scene.add(camera);
 
-            // Materials
             const wallTex = createTexture('wall');
+            wallTex.magFilter = THREE.NearestFilter;
             const floorTex = createTexture('floor');
             floorTex.repeat.set(20, 20); floorTex.wrapS = THREE.RepeatWrapping; floorTex.wrapT = THREE.RepeatWrapping;
             
@@ -184,10 +213,8 @@
             const floorMat = new THREE.MeshStandardMaterial({ map: floorTex });
             const exitMat = new THREE.MeshBasicMaterial({ color: 0x00ff00, transparent: true, opacity: 0.5 });
 
-            // Geometry
             const boxGeo = new THREE.BoxGeometry(MAP_SCALE, WALL_HEIGHT, MAP_SCALE);
 
-            // Build Maze
             for (let z = 0; z < mapSize.rows; z++) {
                 for (let x = 0; x < mapSize.cols; x++) {
                     let cell = mazeMap[z][x];
@@ -195,7 +222,7 @@
                     let posZ = z * MAP_SCALE;
 
                     if (cell === 1) {
-                        const wall = new THREE.Mesh(boxGeo, wallMat.clone()); // Clone for individual color animation
+                        const wall = new THREE.Mesh(boxGeo, wallMat.clone()); 
                         wall.position.set(posX, WALL_HEIGHT / 2, posZ);
                         scene.add(wall);
                         wallColliders.push(new THREE.Box3().setFromObject(wall));
@@ -207,8 +234,6 @@
                         exit.position.set(posX, WALL_HEIGHT/2, posZ);
                         scene.add(exit);
                         exitPosition.set(posX, WALL_HEIGHT, posZ);
-                        
-                        // Add a light to the exit
                         const exitLight = new THREE.PointLight(0x00ff00, 2, 10);
                         exitLight.position.set(posX, 2, posZ);
                         scene.add(exitLight);
@@ -216,17 +241,18 @@
                 }
             }
 
-            // Floor
             const floor = new THREE.Mesh(new THREE.PlaneGeometry(200, 200), floorMat);
             floor.rotation.x = -Math.PI / 2;
             scene.add(floor);
 
-            // Controls
             controls = new PointerLockControls(camera, document.body);
             const msgBox = document.getElementById('message-box');
 
             msgBox.addEventListener('click', () => {
-                if(!isWon) controls.lock();
+                if(!isWon) {
+                    controls.lock();
+                    audioCtx.resume();
+                }
             });
 
             controls.addEventListener('lock', () => {
@@ -244,7 +270,6 @@
                 }
             });
 
-            // Inputs
             const onKeyDown = (e) => {
                 switch (e.code) {
                     case 'KeyW': moveForward = true; break;
@@ -270,10 +295,10 @@
             document.addEventListener('keydown', onKeyDown);
             document.addEventListener('keyup', onKeyUp);
 
-            // Resize
             renderer = new THREE.WebGLRenderer({ antialias: true });
             renderer.setSize(window.innerWidth, window.innerHeight);
             document.body.appendChild(renderer.domElement);
+            
             window.addEventListener('resize', () => {
                 camera.aspect = window.innerWidth / window.innerHeight;
                 camera.updateProjectionMatrix();
@@ -281,7 +306,6 @@
             });
         }
 
-        // Logic
         function checkCollision(position) {
             const playerBox = new THREE.Box3();
             const size = 0.8; 
@@ -300,7 +324,6 @@
             const m = Math.floor(diff / 60).toString().padStart(2,'0');
             const s = (diff % 60).toString().padStart(2,'0');
             document.getElementById('timer').innerText = `TIME: ${m}:${s}`;
-            return `${m}:${s}`;
         }
 
         function updateMinimap() {
@@ -311,7 +334,6 @@
             const cellH = c.height / mapSize.rows;
 
             ctx.clearRect(0,0,200,200);
-
             for(let z=0; z<mapSize.rows; z++){
                 for(let x=0; x<mapSize.cols; x++){
                     let val = mazeMap[z][x];
@@ -319,7 +341,6 @@
                     else if(val === 3) { ctx.fillStyle = '#0f0'; ctx.fillRect(x*cellW, z*cellH, cellW, cellH); }
                 }
             }
-            
             const px = camera.position.x / MAP_SCALE;
             const pz = camera.position.z / MAP_SCALE;
             ctx.fillStyle = 'red';
@@ -332,78 +353,11 @@
             isWon = true;
             gameActive = false;
             controls.unlock();
+            playWinSound();
             
             const finalTime = document.getElementById('timer').innerText.replace("TIME: ", "");
             const msg = document.getElementById('message-box');
             msg.style.display = 'block';
             msg.innerHTML = `
                 <h1 style="color:#0f0; font-size: 3rem;">ESCAPED!</h1>
-                <p>Time Taken: <strong style="color:white; font-size:2rem">${finalTime}</strong></p>
-                <p style="margin-top:20px; font-size:0.9rem">Refresh to play again</p>
-            `;
-            
-            // Move camera for animation
-            camera.position.set(exitPosition.x, exitPosition.y + 10, exitPosition.z + 10);
-            camera.lookAt(exitPosition);
-        }
-
-        function animate() {
-            requestAnimationFrame(animate);
-            const time = performance.now();
-            const delta = (time - prevTime) / 1000;
-
-            if(isWon) {
-                // WIN ANIMATION
-                const radius = 15;
-                const speed = 0.5;
-                camera.position.x = exitPosition.x + radius * Math.cos(time * 0.001 * speed);
-                camera.position.z = exitPosition.z + radius * Math.sin(time * 0.001 * speed);
-                camera.lookAt(exitPosition.x, 0, exitPosition.z);
-                
-                // Disco Walls
-                const hue = (time * 0.1) % 360;
-                wallsMeshArray.forEach(wall => {
-                    wall.material.color.setHSL(hue/360, 1, 0.5);
-                });
-                
-                renderer.render(scene, camera);
-                return;
-            }
-
-            if (controls.isLocked) {
-                velocity.x -= velocity.x * 10.0 * delta;
-                velocity.z -= velocity.z * 10.0 * delta;
-
-                direction.z = Number(moveForward) - Number(moveBackward);
-                direction.x = Number(moveRight) - Number(moveLeft);
-                direction.normalize();
-
-                if (moveForward || moveBackward) velocity.z -= direction.z * MOVEMENT_SPEED * delta;
-                if (moveLeft || moveRight) velocity.x -= direction.x * MOVEMENT_SPEED * delta;
-
-                const oldPos = camera.position.clone();
-                controls.moveRight(-velocity.x * delta);
-                controls.moveForward(-velocity.z * delta);
-
-                if (checkCollision(camera.position)) {
-                    camera.position.copy(oldPos);
-                    velocity.set(0,0,0);
-                }
-
-                // Check Win
-                const pX = Math.round(camera.position.x / MAP_SCALE);
-                const pZ = Math.round(camera.position.z / MAP_SCALE);
-                if(mazeMap[pZ] && mazeMap[pZ][pX] === 3) {
-                    triggerWin();
-                }
-                
-                updateTimer();
-            }
-
-            updateMinimap();
-            prevTime = time;
-            renderer.render(scene, camera);
-        }
-    </script>
-</body>
-</html>
+                <p>Time Taken: <strong style="color:
